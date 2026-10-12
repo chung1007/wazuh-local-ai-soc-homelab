@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,11 @@ from mcp.server.fastmcp import FastMCP
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
+def manager_debug(message: str) -> None:
+    log_path = BASE_DIR / "manager-debug.log"
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+    log_path.chmod(0o600)
 
 def env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
@@ -54,31 +60,81 @@ _manager_token_created = 0.0
 TOKEN_REFRESH_SECONDS = 780
 
 
+# async def get_manager_token() -> str:
+#     """Get and cache a Wazuh Manager API JWT."""
+#     global _manager_token, _manager_token_created
+
+#     if (
+#         _manager_token
+#         and time.monotonic() - _manager_token_created
+#         < TOKEN_REFRESH_SECONDS
+#     ):
+#         return _manager_token
+
+#     async with httpx.AsyncClient(
+#         verify=VERIFY_SSL,
+#         timeout=20.0,
+#     ) as client:
+#         response = await client.post(
+#             f"{WAZUH_API_URL}/security/user/authenticate?raw=true",
+#             auth=httpx.BasicAuth(WAZUH_API_USER, WAZUH_API_PASS),
+#         )
+#         response.raise_for_status()
+
+#     _manager_token = response.text.strip().strip('"')
+#     _manager_token_created = time.monotonic()
+#     return _manager_token
+
 async def get_manager_token() -> str:
     """Get and cache a Wazuh Manager API JWT."""
     global _manager_token, _manager_token_created
+
+    manager_debug("get_manager_token called")
 
     if (
         _manager_token
         and time.monotonic() - _manager_token_created
         < TOKEN_REFRESH_SECONDS
     ):
+        manager_debug("Using cached token")
         return _manager_token
 
-    async with httpx.AsyncClient(
-        verify=VERIFY_SSL,
-        timeout=20.0,
-    ) as client:
-        response = await client.post(
-            f"{WAZUH_API_URL}/security/user/authenticate?raw=true",
-            auth=httpx.BasicAuth(WAZUH_API_USER, WAZUH_API_PASS),
+    url = f"{WAZUH_API_URL}/security/user/authenticate?raw=true"
+    destination = httpx.URL(url)
+    manager_debug(
+        "Attempting authentication at "
+        f"{destination.scheme}://{destination.host}:{destination.port}"
+    )
+
+    try:
+        async with httpx.AsyncClient(
+            verify=VERIFY_SSL,
+            timeout=20.0,
+            trust_env=False,
+        ) as client:
+            response = await client.post(
+                url,
+                auth=httpx.BasicAuth(WAZUH_API_USER, WAZUH_API_PASS),
+            )
+            response.raise_for_status()
+
+    except httpx.RequestError as exc:
+        manager_debug(
+            f"Authentication request failed: {type(exc).__name__}: {exc}"
         )
-        response.raise_for_status()
+        raise
+
+    except httpx.HTTPStatusError as exc:
+        manager_debug(
+            f"Authentication returned HTTP {exc.response.status_code}"
+        )
+        raise
+
+    manager_debug(f"Authentication returned HTTP {response.status_code}")
 
     _manager_token = response.text.strip().strip('"')
     _manager_token_created = time.monotonic()
     return _manager_token
-
 
 async def manager_get(
     path: str,
@@ -92,6 +148,7 @@ async def manager_get(
     async with httpx.AsyncClient(
         verify=VERIFY_SSL,
         timeout=30.0,
+        trust_env=False,
     ) as client:
         response = await client.get(
             f"{WAZUH_API_URL}{path}",
@@ -120,6 +177,7 @@ async def indexer_search(
     async with httpx.AsyncClient(
         verify=VERIFY_SSL,
         timeout=45.0,
+        trust_env=False,
     ) as client:
         response = await client.post(
             f"{WAZUH_INDEXER_URL}/{index}/_search",
